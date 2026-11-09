@@ -159,3 +159,45 @@ function teardown() {
   sv_runc exec syscont sh -c "stat /sys/devices/virtual/net/lo/subsystem/lo/subsystem | egrep -q \"../../../../class/net\""
   [ "$status" -eq 0 ]
 }
+
+# Verifies the proper behavior of the sysDevicesVirtual handler for the
+# "/sys/devices/virtual/kfd" hierarchy (passthrough node). AMD ROCm (libhsakmt)
+# reads the GPU topology from these files; non-passthrough reads return empty,
+# which makes rocminfo fail. Only runs on hosts with AMD KFD.
+@test "/sys/devices/virtual/kfd file ops (passthrough)" {
+
+  if [[ ! -e /sys/class/kfd/kfd || ! -e /dev/kfd ]]; then
+    skip "AMD KFD not present on this host (needs /sys/class/kfd/kfd and /dev/kfd)"
+  fi
+
+  local kfdNodes="/sys/devices/virtual/kfd/kfd/topology/nodes"
+
+  # Pass the GPU render nodes along with /dev/kfd, as ROCm needs them.
+  local devOpts="--device /dev/kfd"
+  for dev in /dev/dri/renderD*; do
+    [[ -e "$dev" ]] && devOpts+=" --device $dev"
+  done
+
+  local syscont=$(docker_run $devOpts --rm ${CTR_IMG_REPO}/alpine:latest tail -f /dev/null)
+
+  for node in $(ls $kfdNodes); do
+    local props="$kfdNodes/$node/properties"
+
+    # Every node's properties must be non-empty (the CPU and GPU nodes alike).
+    docker exec "$syscont" sh -c "cat $props"
+    [ "$status" -eq 0 ]
+    [[ -n "$output" ]]
+
+    # Node 0 is the CPU node: its properties are stable across reads, so they
+    # must match the host exactly.
+    if [[ "$node" == "0" ]]; then
+      [[ "$output" == "$(cat $props)" ]]
+    fi
+
+    docker exec "$syscont" sh -c "cat $kfdNodes/$node/gpu_id"
+    [ "$status" -eq 0 ]
+    [[ "$output" == "$(cat $kfdNodes/$node/gpu_id)" ]]
+  done
+
+  docker_stop "$syscont"
+}
